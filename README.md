@@ -18,7 +18,7 @@ MCP 2/4 connected · 1 unresponsive
 同时底栏常驻一行：`MCP 2/4`（有 unresponsive 时变成 `MCP 2/4 · 1!`）。
 
 - 面板在**首个 prompt** 后收起；若所有 server 已 settle，也会在 3 秒后自动收起。
-- `/mcp-status` 重新展开 / 收起，参数：`toggle`（默认）、`on`、`off`。
+- `/mcp-status` 重新展开 / 收起，参数：`toggle`（默认）、`on`、`off`、`color [on|off]`。
 - 轮询：连接阶段每 400ms，超过 15s 后每 3s（持续更新，late connect 也会反映）。
 
 ## 安装 / 加载
@@ -67,8 +67,16 @@ server 连上后，built-in 会注册 `mcp__<server>__<tool>`，namespace 为 `m
 | `mcp_status` | `MCP 2/4`，有 unresponsive 时 `MCP 2/4 · 1!` |
 | `mcp_servers` | `✓github(42) ◌filesystem ✗slack –legacy` |
 | `mcp_indicator` | 紧凑状态 token，适合塞进任意 footer 行：`● MCP 2/4`（全部连上）、`◌ MCP 1/4`（仍在连）、`✗ MCP 1/4`（有失败）、`– MCP`（全 disabled） |
+| `mcp_indicator_color` | 同 `mcp_indicator` 的内容，但自带 ANSI 颜色，随状态自动变化：全连上=绿（success）、仍在连=黄（accent）、有 unresponsive=红（error）、全 disabled=暗（dim）。颜色取自 pi 主题 |
 
-用法：在 pi-footer 里加一个 **Pi Event Value** 控件，Widget ID 填其中之一。要行内变色指示时选 `mcp_indicator`（颜色由控件的 fg 决定，状态靠 token 前缀区分）。也可以继续用 **Pi Extension Status** 控件或 `Pi extensions` 菜单读取 status key `mcp`（内容等同 `mcp_status`）。
+用法：在 pi-footer 里加一个 **Pi Event Value** 控件，Widget ID 填其中之一。要行内变色指示时选 `mcp_indicator_color`（自动变色，别再给控件设 fg，否则会在 token 结束后重置回默认色）；要由控件 fg 统一控制颜色时选 `mcp_indicator`。也可以继续用 **Pi Extension Status** 控件或 `Pi extensions` 菜单读取 status key `mcp`（内容等同 `mcp_status`）。
+
+### 自动变色
+
+`mcp_indicator_color` 的颜色由扩展在 value 里嵌入 ANSI 实现（pi-footer 默认保留 event value 的 ANSI）。状态取“最差优先”：只要有一个 server unresponsive 就是红色，其次是 connecting 的黄色，然后是全 disabled 的暗色，其余为绿色。
+
+- `/mcp-status color` 切换自动变色，`/mcp-status color on` / `color off` 显式开关。关闭时会向 `mcp_indicator_color` 发送 `null` 清空。
+- 开关是运行时状态，不写入配置；改主题后颜色会在下一次状态变化时刷新。
 
 - 值只在变化时发布；session 启动会重发当前值，`session_shutdown` 发送 `null` 清空（pi-footer 的值是内存态）。
 - pi-footer 不在也不报错，事件总线没有监听者而已；未来 pi 没有 `pi.events` 时会被静默忽略。

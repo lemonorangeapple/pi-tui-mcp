@@ -37,6 +37,8 @@ const FOOTER_EVENT = "pi-footer:update-widget";
 const FOOTER_WIDGET_SUMMARY = "mcp_status";
 const FOOTER_WIDGET_SERVERS = "mcp_servers";
 const FOOTER_WIDGET_INDICATOR = "mcp_indicator";
+/** Auto-colored twin of `mcp_indicator`: same token, ANSI-colored from the pi theme. */
+const FOOTER_WIDGET_INDICATOR_COLOR = "mcp_indicator_color";
 
 /** Poll fast while servers connect, slowly once the settle timeout passed. */
 const FAST_POLL_MS = 400;
@@ -285,6 +287,26 @@ function indicatorText(statuses: ServerStatus[]): string | null {
 	return `● MCP ${connected}/${enabled}`;
 }
 
+/**
+ * Overall state → theme color for the auto-colored indicator widget. Worst state wins, so a single
+ * failed server is red even while others are still connecting.
+ */
+function indicatorColor(statuses: ServerStatus[]): Parameters<Theme["fg"]>[0] {
+	if (statuses.some((status) => status.state === "unresponsive")) return "error";
+	if (statuses.some((status) => status.state === "connecting")) return "accent";
+	if (statuses.every((status) => !status.server.enabled)) return "dim";
+	return "success";
+}
+
+/**
+ * `indicatorText` wrapped in theme ANSI. pi-footer preserves it, so the widget recolors itself as
+ * state changes without any per-widget fg configuration.
+ */
+function coloredIndicatorText(statuses: ServerStatus[], theme: Theme): string | null {
+	const text = indicatorText(statuses);
+	return text ? theme.fg(indicatorColor(statuses), text) : null;
+}
+
 /** One-line per-server overview for the pi-footer event widget. */
 function detailText(statuses: ServerStatus[]): string {
 	const ordered = [...statuses].sort(
@@ -372,6 +394,18 @@ export default function mcpStatusExtension(pi: ExtensionAPI): void {
 	let publishedSummary: string | null = null;
 	let publishedServers: string | null = null;
 	let publishedIndicator: string | null = null;
+	let publishedIndicatorColor: string | null = null;
+	/** Whether the auto-colored indicator widget is published. Runtime-only, toggled by /mcp-status color. */
+	let colorEnabled = true;
+
+	/** `sessionCtx.ui.theme` is absent in non-interactive modes. */
+	const currentTheme = (): Theme | undefined => {
+		try {
+			return sessionCtx?.ui.theme;
+		} catch {
+			return undefined;
+		}
+	};
 
 	/**
 	 * Publish MCP state to pi-footer's event widgets. pi-footer is optional: without it the bus has
@@ -381,6 +415,8 @@ export default function mcpStatusExtension(pi: ExtensionAPI): void {
 		const summary = servers.length > 0 ? summaryText(statuses) : null;
 		const detail = statuses.length > 0 ? detailText(statuses) : null;
 		const indicator = indicatorText(statuses);
+		const theme = colorEnabled ? currentTheme() : undefined;
+		const coloredIndicator = theme ? coloredIndicatorText(statuses, theme) : null;
 		if (summary !== publishedSummary) {
 			publishedSummary = summary;
 			emitFooterWidget(pi, FOOTER_WIDGET_SUMMARY, summary);
@@ -392,6 +428,10 @@ export default function mcpStatusExtension(pi: ExtensionAPI): void {
 		if (indicator !== publishedIndicator) {
 			publishedIndicator = indicator;
 			emitFooterWidget(pi, FOOTER_WIDGET_INDICATOR, indicator);
+		}
+		if (coloredIndicator !== publishedIndicatorColor) {
+			publishedIndicatorColor = coloredIndicator;
+			emitFooterWidget(pi, FOOTER_WIDGET_INDICATOR_COLOR, coloredIndicator);
 		}
 	};
 
@@ -474,7 +514,9 @@ export default function mcpStatusExtension(pi: ExtensionAPI): void {
 		description: "Show or hide the MCP server loading status panel",
 		getArgumentCompletions: (prefix) => {
 			const value = prefix.trimStart();
-			const options = ["toggle", "on", "off"].filter((option) => option.startsWith(value));
+			const options = ["toggle", "on", "off", "color", "color on", "color off"].filter((option) =>
+				option.startsWith(value),
+			);
 			return options.length > 0 ? options.map((option) => ({ value: option, label: option })) : null;
 		},
 		handler: async (args, ctx) => {
@@ -490,7 +532,17 @@ export default function mcpStatusExtension(pi: ExtensionAPI): void {
 				render();
 				return;
 			}
-			ctx.ui.notify(`Usage: /mcp-status [toggle|on|off]\n\n${statuses.length} server(s) known, ${errors.length} config error(s).`, "info");
+			if (action === "color" || action === "color on" || action === "color off") {
+				colorEnabled = action === "color on" ? true : action === "color off" ? false : !colorEnabled;
+				sessionCtx = ctx;
+				publishFooter();
+				ctx.ui.notify(
+					`Automatic color ${colorEnabled ? "on" : "off"} for the ${FOOTER_WIDGET_INDICATOR_COLOR} footer widget.`,
+					"info",
+				);
+				return;
+			}
+			ctx.ui.notify(`Usage: /mcp-status [toggle|on|off|color [on|off]]\n\n${statuses.length} server(s) known, ${errors.length} config error(s).`, "info");
 		},
 	});
 
