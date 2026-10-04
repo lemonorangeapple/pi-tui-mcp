@@ -22,6 +22,10 @@ MCP 2/4 connected · 1 unresponsive
 - 轮询：连接阶段每 400ms，超过 15s 后每 3s（持续更新，late connect 也会反映）。
 
 ## 安装 / 加载
+```bash
+pi install git:github.com/lemonorangeapple/pi-tui-mcp
+```
+
 
 本地开发，直接按文件加载：
 
