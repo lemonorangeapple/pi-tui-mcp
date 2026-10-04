@@ -36,6 +36,7 @@ const STATUS_KEY = "mcp";
 const FOOTER_EVENT = "pi-footer:update-widget";
 const FOOTER_WIDGET_SUMMARY = "mcp_status";
 const FOOTER_WIDGET_SERVERS = "mcp_servers";
+const FOOTER_WIDGET_INDICATOR = "mcp_indicator";
 
 /** Poll fast while servers connect, slowly once the settle timeout passed. */
 const FAST_POLL_MS = 400;
@@ -271,6 +272,19 @@ function summaryText(statuses: ServerStatus[]): string {
 	return failed > 0 ? `MCP ${connected}/${enabled} · ${failed}!` : `MCP ${connected}/${enabled}`;
 }
 
+/** Compact state token for the pi-footer event widget, small enough to inline anywhere. */
+function indicatorText(statuses: ServerStatus[]): string | null {
+	if (statuses.length === 0) return null;
+	const enabled = statuses.filter((status) => status.server.enabled).length;
+	const connected = statuses.filter((status) => status.state === "connected").length;
+	const connecting = statuses.filter((status) => status.state === "connecting").length;
+	const failed = statuses.filter((status) => status.state === "unresponsive").length;
+	if (failed > 0) return `✗ MCP ${connected}/${enabled}`;
+	if (connecting > 0) return `◌ MCP ${connected}/${enabled}`;
+	if (enabled === 0) return "– MCP";
+	return `● MCP ${connected}/${enabled}`;
+}
+
 /** One-line per-server overview for the pi-footer event widget. */
 function detailText(statuses: ServerStatus[]): string {
 	const ordered = [...statuses].sort(
@@ -357,6 +371,7 @@ export default function mcpStatusExtension(pi: ExtensionAPI): void {
 	let sessionCtx: ExtensionContext | undefined;
 	let publishedSummary: string | null = null;
 	let publishedServers: string | null = null;
+	let publishedIndicator: string | null = null;
 
 	/**
 	 * Publish MCP state to pi-footer's event widgets. pi-footer is optional: without it the bus has
@@ -365,6 +380,7 @@ export default function mcpStatusExtension(pi: ExtensionAPI): void {
 	const publishFooter = () => {
 		const summary = servers.length > 0 ? summaryText(statuses) : null;
 		const detail = statuses.length > 0 ? detailText(statuses) : null;
+		const indicator = indicatorText(statuses);
 		if (summary !== publishedSummary) {
 			publishedSummary = summary;
 			emitFooterWidget(pi, FOOTER_WIDGET_SUMMARY, summary);
@@ -372,6 +388,10 @@ export default function mcpStatusExtension(pi: ExtensionAPI): void {
 		if (detail !== publishedServers) {
 			publishedServers = detail;
 			emitFooterWidget(pi, FOOTER_WIDGET_SERVERS, detail);
+		}
+		if (indicator !== publishedIndicator) {
+			publishedIndicator = indicator;
+			emitFooterWidget(pi, FOOTER_WIDGET_INDICATOR, indicator);
 		}
 	};
 

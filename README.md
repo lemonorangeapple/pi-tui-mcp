@@ -66,8 +66,9 @@ server 连上后，built-in 会注册 `mcp__<server>__<tool>`，namespace 为 `m
 | --- | --- |
 | `mcp_status` | `MCP 2/4`，有 unresponsive 时 `MCP 2/4 · 1!` |
 | `mcp_servers` | `✓github(42) ◌filesystem ✗slack –legacy` |
+| `mcp_indicator` | 紧凑状态 token，适合塞进任意 footer 行：`● MCP 2/4`（全部连上）、`◌ MCP 1/4`（仍在连）、`✗ MCP 1/4`（有失败）、`– MCP`（全 disabled） |
 
-用法：在 pi-footer 里加一个 **Pi Event Value** 控件，Widget ID 填 `mcp_status` 或 `mcp_servers`。也可以继续用 **Pi Extension Status** 控件或 `Pi extensions` 菜单读取 status key `mcp`（内容等同 `mcp_status`）。
+用法：在 pi-footer 里加一个 **Pi Event Value** 控件，Widget ID 填其中之一。要行内变色指示时选 `mcp_indicator`（颜色由控件的 fg 决定，状态靠 token 前缀区分）。也可以继续用 **Pi Extension Status** 控件或 `Pi extensions` 菜单读取 status key `mcp`（内容等同 `mcp_status`）。
 
 - 值只在变化时发布；session 启动会重发当前值，`session_shutdown` 发送 `null` 清空（pi-footer 的值是内存态）。
 - pi-footer 不在也不报错，事件总线没有监听者而已；未来 pi 没有 `pi.events` 时会被静默忽略。
