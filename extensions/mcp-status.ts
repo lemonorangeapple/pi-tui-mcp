@@ -32,6 +32,11 @@ import {
 const WIDGET_KEY = "mcp-status";
 const STATUS_KEY = "mcp";
 
+/** pi-footer integration: publish the same state as event widgets the user can place in the footer. */
+const FOOTER_EVENT = "pi-footer:update-widget";
+const FOOTER_WIDGET_SUMMARY = "mcp_status";
+const FOOTER_WIDGET_SERVERS = "mcp_servers";
+
 /** Poll fast while servers connect, slowly once the settle timeout passed. */
 const FAST_POLL_MS = 400;
 const SLOW_POLL_MS = 3000;
@@ -251,6 +256,31 @@ const STATE_TEXT: Record<ServerState, string> = {
 	disabled: "disabled",
 };
 
+const DETAIL_MARK: Record<ServerState, string> = {
+	connected: "✓",
+	connecting: "◌",
+	unresponsive: "✗",
+	disabled: "–",
+};
+
+/** Plain-text summary shared by the footer status and the pi-footer event widget. */
+function summaryText(statuses: ServerStatus[]): string {
+	const enabled = statuses.filter((status) => status.server.enabled).length;
+	const connected = statuses.filter((status) => status.state === "connected").length;
+	const failed = statuses.filter((status) => status.state === "unresponsive").length;
+	return failed > 0 ? `MCP ${connected}/${enabled} · ${failed}!` : `MCP ${connected}/${enabled}`;
+}
+
+/** One-line per-server overview for the pi-footer event widget. */
+function detailText(statuses: ServerStatus[]): string {
+	const ordered = [...statuses].sort(
+		(a, b) => STATE_RANK[a.state] - STATE_RANK[b.state] || a.server.name.localeCompare(b.server.name),
+	);
+	return ordered
+		.map(({ server, tools, state }) => `${DETAIL_MARK[state]}${server.name}${tools > 0 ? `(${tools})` : ""}`)
+		.join(" ");
+}
+
 function describeStatus(status: ServerStatus): string {
 	const { server, tools, state } = status;
 	if (state === "connected") {
@@ -307,6 +337,14 @@ function buildLines(
 	return lines;
 }
 
+function emitFooterWidget(pi: ExtensionAPI, widgetId: string, value: string | null): void {
+	try {
+		pi.events.emit(FOOTER_EVENT, { widgetId, value });
+	} catch {
+		// A pi without the shared event bus (or a throwing listener) must not break the panel.
+	}
+}
+
 export default function mcpStatusExtension(pi: ExtensionAPI): void {
 	let generation = 0;
 	let servers: ServerInfo[] = [];
@@ -317,6 +355,25 @@ export default function mcpStatusExtension(pi: ExtensionAPI): void {
 	let hideTimer: ReturnType<typeof setTimeout> | undefined;
 	let widgetVisible = true;
 	let sessionCtx: ExtensionContext | undefined;
+	let publishedSummary: string | null = null;
+	let publishedServers: string | null = null;
+
+	/**
+	 * Publish MCP state to pi-footer's event widgets. pi-footer is optional: without it the bus has
+	 * no listener. Values are in-memory, so they are re-published on every session start and tick.
+	 */
+	const publishFooter = () => {
+		const summary = servers.length > 0 ? summaryText(statuses) : null;
+		const detail = statuses.length > 0 ? detailText(statuses) : null;
+		if (summary !== publishedSummary) {
+			publishedSummary = summary;
+			emitFooterWidget(pi, FOOTER_WIDGET_SUMMARY, summary);
+		}
+		if (detail !== publishedServers) {
+			publishedServers = detail;
+			emitFooterWidget(pi, FOOTER_WIDGET_SERVERS, detail);
+		}
+	};
 
 	const clearTimers = () => {
 		if (timer) clearTimeout(timer);
@@ -341,11 +398,7 @@ export default function mcpStatusExtension(pi: ExtensionAPI): void {
 			ctx.ui.setStatus(STATUS_KEY, undefined);
 			return;
 		}
-		const enabled = statuses.filter((status) => status.server.enabled).length;
-		const connected = statuses.filter((status) => status.state === "connected").length;
-		const failed = statuses.filter((status) => status.state === "unresponsive").length;
-		const text = failed > 0 ? `MCP ${connected}/${enabled} · ${failed}!` : `MCP ${connected}/${enabled}`;
-		ctx.ui.setStatus(STATUS_KEY, text);
+		ctx.ui.setStatus(STATUS_KEY, summaryText(statuses));
 	};
 
 	const hideWidget = () => {
@@ -387,6 +440,7 @@ export default function mcpStatusExtension(pi: ExtensionAPI): void {
 		}
 		const settled = Date.now() - startedAt >= SETTLE_MS;
 		statuses = computeStatuses(servers, counts, settled);
+		publishFooter();
 		try {
 			render();
 		} catch {
@@ -436,6 +490,7 @@ export default function mcpStatusExtension(pi: ExtensionAPI): void {
 		}
 		const counts = servers.length > 0 ? readConnected(pi, servers) : new Map<string, number>();
 		statuses = computeStatuses(servers, counts, false);
+		publishFooter();
 		try {
 			render();
 		} catch {
@@ -466,5 +521,6 @@ export default function mcpStatusExtension(pi: ExtensionAPI): void {
 		servers = [];
 		errors = [];
 		widgetVisible = false;
+		publishFooter();
 	});
 }

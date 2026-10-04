@@ -53,3 +53,18 @@ server 连上后，built-in 会注册 `mcp__<server>__<tool>`，namespace 为 `m
 - 只读观察，不会触发连接，也不会影响 built-in MCP、`/mcp` 管理器或 codemode。
 
 完整管理（登录、重连、启停、exposure）请用 built-in 的 `/mcp`。
+
+## 与 pi-footer 联动
+
+装了 [pi-footer](https://github.com/wobondar/pi-footer) 时，本扩展会把同一份 MCP 状态按它的事件控件契约发出去（`pi.events` → `pi-footer:update-widget`）：
+
+| Widget ID | 内容 |
+| --- | --- |
+| `mcp_status` | `MCP 2/4`，有 unresponsive 时 `MCP 2/4 · 1!` |
+| `mcp_servers` | `✓github(42) ◌filesystem ✗slack –legacy` |
+
+用法：在 pi-footer 里加一个 **Pi Event Value** 控件，Widget ID 填 `mcp_status` 或 `mcp_servers`。也可以继续用 **Pi Extension Status** 控件或 `Pi extensions` 菜单读取 status key `mcp`（内容等同 `mcp_status`）。
+
+- 值只在变化时发布；session 启动会重发当前值，`session_shutdown` 发送 `null` 清空（pi-footer 的值是内存态）。
+- pi-footer 不在也不报错，事件总线没有监听者而已；未来 pi 没有 `pi.events` 时会被静默忽略。
+- 本扩展不调用 `ctx.ui.setFooter`，不接管 footer，显示什么完全由 pi-footer 配置决定。
