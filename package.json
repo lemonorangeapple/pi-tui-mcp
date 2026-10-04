@@ -1,0 +1,18 @@
+{
+	"name": "pi-mcp-status",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"description": "Show pi's built-in MCP server loading status in the TUI",
+	"keywords": [
+		"pi-package"
+	],
+	"pi": {
+		"extensions": [
+			"./extensions/mcp-status.ts"
+		]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*"
+	}
+}
