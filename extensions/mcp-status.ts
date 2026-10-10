@@ -94,9 +94,10 @@ function makeServerInfo(
 ): ServerInfo | string {
 	if (!SERVER_NAME.test(name))
 		return `invalid server name "${name}" (use letters, digits, "_" and "-")`;
-	const hasUrl = typeof raw.url === "string";
-	const hasCommand = typeof raw.command === "string";
-	if (!hasUrl && !hasCommand) return `server "${name}" needs "command" (stdio) or "url" (streamable HTTP)`;
+	const url = typeof raw.url === "string" ? raw.url : undefined;
+	const command = typeof raw.command === "string" ? raw.command : undefined;
+	if (url === undefined && command === undefined)
+		return `server "${name}" needs "command" (stdio) or "url" (streamable HTTP)`;
 	const exposure = resolveExposure(raw.exposure) ?? "codemode";
 	if (raw.exposure !== undefined && resolveExposure(raw.exposure) === undefined)
 		return `server "${name}": exposure must be codemode, deferred, direct, or hidden`;
@@ -107,7 +108,7 @@ function makeServerInfo(
 		originPath,
 		enabled: raw.enabled !== false,
 		exposure,
-		transport: hasUrl ? raw.url : [raw.command, ...args].join(" "),
+		transport: url ?? [command, ...args].join(" "),
 		description: typeof raw.description === "string" ? raw.description : undefined,
 	};
 }
