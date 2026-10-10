@@ -124,3 +124,7 @@ npm test            # node:test，假 pi + 假 TUI + mock timers，不需要真�
 - `src/status.ts`：从工具注册表推断状态、按 server 计时。
 - `src/format.ts`：面板与 footer 文案。
 - `src/panel.ts`：面板 auto/pinned/hidden 状态机。
+
+## License
+
+[MIT](LICENSE)

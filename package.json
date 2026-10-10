@@ -4,6 +4,7 @@
 	"private": true,
 	"type": "module",
 	"description": "Show pi's built-in MCP server loading status in the TUI",
+	"license": "MIT",
 	"keywords": [
 		"pi-package"
 	],
