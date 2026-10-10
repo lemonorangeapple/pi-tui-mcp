@@ -19,13 +19,16 @@ export interface FooterEmit {
 	value: string | null;
 }
 
+/** A registered tool, given by its `namespace.name`, or with the exposure it was registered with. */
+export type ToolSpec = string | { namespace: string; exposure?: string };
+
 export interface EnvOptions {
 	/** Content of the global `mcp.json`. */
 	globalConfig?: object;
 	/** Content of the trusted project's `.pi/mcp.json`. */
 	projectConfig?: object;
-	/** `namespace.name` of the registered tools, one tool per entry. */
-	toolNamespaces?: string[];
+	/** The registered tools, one per entry. */
+	toolNamespaces?: ToolSpec[];
 	/** Servers registered with `pi.registerMcpServer()`. */
 	registered?: Array<{ name: string; config: Record<string, unknown>; extensionPath?: string }>;
 }
@@ -47,7 +50,8 @@ export function createEnv(options: EnvOptions = {}) {
 	const commands: Record<string, { handler: (args: string, ctx: unknown) => Promise<void> | void }> = {};
 	const emits: FooterEmit[] = [];
 	const state = {
-		toolNamespaces: options.toolNamespaces ?? [],
+		toolNamespaces: (options.toolNamespaces ?? []) as ToolSpec[],
+		registered: options.registered ?? [],
 		getAllToolsCalls: 0,
 		themeThrows: false,
 	};
@@ -61,10 +65,12 @@ export function createEnv(options: EnvOptions = {}) {
 		},
 		getAllTools: () => {
 			state.getAllToolsCalls++;
-			return state.toolNamespaces.map((name) => ({ name: `${name}__tool`, namespace: { name } }));
+			return state.toolNamespaces.map((spec, index) => {
+				const { namespace, exposure } = typeof spec === "string" ? { namespace: spec, exposure: undefined } : spec;
+				return { name: `${namespace}__tool${index}`, namespace: { name: namespace }, exposure: exposure ?? "codemode" };
+			});
 		},
-		getMcpServers: () =>
-			(options.registered ?? []).map((server) => ({ extensionPath: "/ext/registered.ts", ...server })),
+		getMcpServers: () => state.registered.map((server) => ({ extensionPath: "/ext/registered.ts", ...server })),
 		events: {
 			emit: (_channel: string, payload: FooterEmit) => {
 				emits.push(payload);

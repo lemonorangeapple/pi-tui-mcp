@@ -19,7 +19,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { errorMessage, loadServers, type ServerInfo } from "../src/config.ts";
+import { configSignature, errorMessage, loadServers, type ServerInfo } from "../src/config.ts";
 import {
 	buildLines,
 	coloredIndicatorText,
@@ -35,7 +35,13 @@ import {
 	type PanelAction,
 	type PanelMode,
 } from "../src/panel.ts";
-import { allSettled, computeStatuses, readConnected, type ServerStatus } from "../src/status.ts";
+import {
+	allSettled,
+	computeStatuses,
+	readConnected,
+	reconcileSince,
+	type ServerStatus,
+} from "../src/status.ts";
 
 const WIDGET_KEY = "mcp-status";
 const STATUS_KEY = "mcp";
@@ -48,11 +54,9 @@ const FOOTER_WIDGET_INDICATOR = "mcp_indicator";
 /** Auto-colored twin of `mcp_indicator`: same token, ANSI-colored from the pi theme. */
 const FOOTER_WIDGET_INDICATOR_COLOR = "mcp_indicator_color";
 
-/** Poll fast while servers connect, slowly once the settle timeout passed. */
+/** Poll fast while a server is connecting, slowly once every server settled. */
 const FAST_POLL_MS = 400;
 const SLOW_POLL_MS = 3000;
-/** After this long without tools, an enabled server is shown as unresponsive. */
-const SETTLE_MS = 15_000;
 /** How long the automatic panel stays after every server settled, unless the first prompt hides it sooner. */
 const HIDE_AFTER_SETTLED_MS = 3000;
 
@@ -78,7 +82,10 @@ export default function mcpStatusExtension(pi: ExtensionAPI): void {
 	let servers: ServerInfo[] = [];
 	let errors: string[] = [];
 	let statuses: ServerStatus[] = [];
-	let startedAt = 0;
+	/** When each enabled server started to be awaited; see `reconcileSince`. */
+	let since = new Map<string, number>();
+	/** Fingerprint of the configuration `servers` was loaded from. */
+	let signature = "";
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let hideTimer: ReturnType<typeof setTimeout> | undefined;
 	let panelMode: PanelMode = INITIAL_PANEL_MODE;
@@ -154,7 +161,7 @@ export default function mcpStatusExtension(pi: ExtensionAPI): void {
 		if (!ctx) return;
 		if (ctx.mode !== "tui" || !ctx.hasUI) return;
 
-		if (isVisible(panelMode) && statuses.length > 0) {
+		if (isVisible(panelMode) && (statuses.length > 0 || errors.length > 0)) {
 			const theme = ctx.ui.theme;
 			ctx.ui.setWidget(WIDGET_KEY, buildLines(statuses, errors, theme, true), { placement: "aboveEditor" });
 		} else {
@@ -205,18 +212,41 @@ export default function mcpStatusExtension(pi: ExtensionAPI): void {
 		unrefTimer(timer);
 	};
 
-	const tick = () => {
-		if (!sessionCtx) return;
-		const settled = Date.now() - startedAt >= SETTLE_MS;
+	/** (Re)read the configuration. A failure leaves no servers and one error instead of throwing. */
+	const loadConfig = (ctx: ExtensionContext, now: number) => {
+		signature = configSignature(pi, ctx);
 		try {
-			statuses = computeStatuses(servers, readConnected(pi, servers), settled);
+			const loaded = loadServers(pi, ctx);
+			servers = loaded.servers;
+			errors = loaded.errors;
+		} catch (error) {
+			servers = [];
+			errors = [errorMessage(error)];
+		}
+		since = reconcileSince(since, servers, now);
+	};
+
+	const updateStatuses = (now: number) => {
+		statuses = computeStatuses(servers, readConnected(pi, servers), now, since);
+	};
+
+	const tick = () => {
+		const ctx = sessionCtx;
+		if (!ctx) return;
+		let connecting = true;
+		try {
+			const now = Date.now();
+			// `/mcp` toggling a server, an edited mcp.json or a late registration all show up here.
+			if (configSignature(pi, ctx) !== signature) loadConfig(ctx, now);
+			updateStatuses(now);
+			connecting = !allSettled(statuses);
 			publishFooter();
 			safeRender();
 			scheduleHideWhenSettled();
 		} catch {
 			// Whatever went wrong this round, the next poll gets its chance.
 		} finally {
-			schedule(settled ? SLOW_POLL_MS : FAST_POLL_MS);
+			schedule(connecting ? FAST_POLL_MS : SLOW_POLL_MS);
 		}
 	};
 
@@ -261,22 +291,15 @@ export default function mcpStatusExtension(pi: ExtensionAPI): void {
 		epoch++;
 		sessionCtx = ctx;
 		panelMode = INITIAL_PANEL_MODE;
-		startedAt = Date.now();
-		try {
-			const loaded = loadServers(pi, ctx);
-			servers = loaded.servers;
-			errors = loaded.errors;
-		} catch (error) {
-			servers = [];
-			errors = [errorMessage(error)];
-		}
-		statuses = computeStatuses(servers, readConnected(pi, servers), false);
+		since = new Map();
+		const now = Date.now();
+		loadConfig(ctx, now);
+		updateStatuses(now);
 		publishFooter();
 		safeRender();
-		if (servers.length > 0) {
-			schedule(FAST_POLL_MS);
-			scheduleHideWhenSettled();
-		}
+		// Always poll: the configuration can gain a server later, and polling is two `stat`s.
+		schedule(FAST_POLL_MS);
+		scheduleHideWhenSettled();
 	});
 
 	// The first prompt is the user's turn: the automatic startup panel steps aside. The footer status stays.
@@ -292,6 +315,8 @@ export default function mcpStatusExtension(pi: ExtensionAPI): void {
 		statuses = [];
 		servers = [];
 		errors = [];
+		since = new Map();
+		signature = "";
 		panelMode = "hidden";
 		publishFooter();
 	});

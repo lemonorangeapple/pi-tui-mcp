@@ -73,13 +73,20 @@ export function detailText(statuses: ServerStatus[]): string {
 		.join(" ");
 }
 
+/** A connect that takes longer than this shows how long it has been waiting. */
+const SHOW_WAIT_AFTER_MS = 10_000;
+
 function describeStatus(status: ServerStatus): string {
-	const { server, tools, state } = status;
+	const { server, tools, state, waitedMs } = status;
 	if (state === "connected") {
 		const toolsText = `${tools} tool${tools === 1 ? "" : "s"}`;
 		return `${toolsText} · ${server.exposure}`;
 	}
 	if (state === "unresponsive") return `failed or needs sign-in · ${server.exposure}`;
+	if (state === "connecting") {
+		const waiting = waitedMs >= SHOW_WAIT_AFTER_MS ? `connecting ${Math.floor(waitedMs / 1000)}s` : "connecting…";
+		return `${waiting} · ${server.exposure}`;
+	}
 	return server.exposure;
 }
 
