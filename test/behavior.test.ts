@@ -1,0 +1,377 @@
+import assert from "node:assert/strict";
+import { afterEach, mock, test } from "node:test";
+import { createEnv } from "./helpers.ts";
+
+afterEach(() => mock.timers.reset());
+
+const FOOTER_WIDGETS = ["mcp_status", "mcp_servers", "mcp_indicator", "mcp_indicator_color"];
+
+test("a server whose tools are registered shows as connected", () => {
+	const env = createEnv({ globalConfig: { mcpServers: { a: { command: "x" } } }, toolNamespaces: ["mcp__a"] });
+	env.startSession();
+	assert.match(env.panelText() ?? "", /MCP 1\/1 connected/);
+	assert.match(env.panelText() ?? "", /✓ a\s+1 tool · codemode/);
+	assert.equal(env.ui.status, "MCP 1/1");
+});
+
+test("a server without tools is connecting, then unresponsive after the built-in timeout, then recovers", () => {
+	const env = createEnv({ globalConfig: { mcpServers: { a: { command: "x" } } } });
+	env.startSession();
+	assert.match(env.panelText() ?? "", /◌ a\s+connecting…/);
+	assert.equal(env.ui.status, "MCP 0/1");
+
+	// The built-in integration waits 60s by default: well past 15s it is still connecting.
+	env.advance(30_000);
+	assert.match(env.panelText() ?? "", /◌ a\s+connecting 30s/);
+	assert.equal(env.ui.status, "MCP 0/1");
+
+	env.advance(33_000);
+	assert.match(env.panelText() ?? "", /✗ a\s+failed or needs sign-in/);
+	assert.equal(env.ui.status, "MCP 0/1 · 1!");
+
+	// Late connect is picked up by the slow poll.
+	env.state.toolNamespaces = ["mcp__a"];
+	env.advance(3_100);
+	assert.equal(env.ui.status, "MCP 1/1");
+});
+
+test("a disabled server is listed as disabled and does not count as enabled", () => {
+	const env = createEnv({ globalConfig: { mcpServers: { a: { command: "x", enabled: false } } } });
+	env.startSession();
+	assert.match(env.panelText() ?? "", /– a/);
+	assert.equal(env.ui.status, "MCP 0/0");
+});
+
+test("a project entry without command/url overrides the global server", () => {
+	const env = createEnv({
+		globalConfig: { mcpServers: { a: { command: "x" } } },
+		projectConfig: { mcpServers: { a: { enabled: false } } },
+		toolNamespaces: [],
+	});
+	env.startSession();
+	assert.match(env.panelText() ?? "", /– a/);
+});
+
+test("mcp.json wins over an extension-registered server of the same name", () => {
+	const env = createEnv({
+		globalConfig: { mcpServers: { dup: { command: "x", enabled: false } } },
+		registered: [{ name: "dup", config: { command: "y" } }],
+	});
+	env.startSession();
+	const rows = (env.ui.widget ?? []).filter((line) => line.includes("dup"));
+	assert.equal(rows.length, 1);
+	assert.match(rows[0] ?? "", /– dup/);
+});
+
+test("an extension-registered server is listed", () => {
+	const env = createEnv({ registered: [{ name: "ext", config: { command: "y" } }], toolNamespaces: ["mcp__ext"] });
+	env.startSession();
+	assert.match(env.panelText() ?? "", /✓ ext/);
+});
+
+test("invalid entries are reported as config errors", () => {
+	const env = createEnv({
+		globalConfig: {
+			mcpServers: {
+				ok: { command: "x" },
+				"bad name": { command: "x" },
+				nocmd: {},
+				badexp: { command: "x", exposure: "nope" },
+			},
+		},
+		toolNamespaces: ["mcp__ok"],
+	});
+	env.startSession();
+	assert.match(env.panelText() ?? "", /3 config errors/);
+	assert.match(env.panelText() ?? "", /invalid server name "bad name"/);
+});
+
+test("the panel hides itself 3s after every server settled", () => {
+	const env = createEnv({ globalConfig: { mcpServers: { a: { command: "x" } } }, toolNamespaces: ["mcp__a"] });
+	env.startSession();
+	env.advance(2_900);
+	assert.ok(env.ui.widget, "still visible just before the delay");
+	env.advance(200);
+	assert.equal(env.ui.widget, undefined);
+	assert.equal(env.ui.status, "MCP 1/1", "the footer status stays");
+});
+
+test("the first turn hides the panel while servers are still connecting", () => {
+	const env = createEnv({ globalConfig: { mcpServers: { a: { command: "x" } } } });
+	env.startSession();
+	assert.ok(env.ui.widget);
+	env.turnStart();
+	assert.equal(env.ui.widget, undefined);
+});
+
+test("/mcp-status off hides and on shows the panel", async () => {
+	const env = createEnv({ globalConfig: { mcpServers: { a: { command: "x" } } } });
+	env.startSession();
+	await env.command("off");
+	assert.equal(env.ui.widget, undefined);
+	await env.command("on");
+	assert.ok(env.ui.widget);
+});
+
+test("footer widgets are published once and only again on change", () => {
+	const env = createEnv({ globalConfig: { mcpServers: { a: { command: "x" } } }, toolNamespaces: ["mcp__a"] });
+	env.startSession();
+	assert.deepEqual(env.emits.map((emit) => emit.widgetId).sort(), [...FOOTER_WIDGETS].sort());
+	env.advance(2_000);
+	assert.equal(env.emits.length, FOOTER_WIDGETS.length, "unchanged state emits nothing");
+
+	env.state.toolNamespaces = [];
+	env.advance(65_000);
+	assert.equal(env.lastEmit("mcp_status"), "MCP 0/1 · 1!");
+	assert.equal(env.lastEmit("mcp_indicator"), "✗ MCP 0/1");
+});
+
+test("session shutdown clears every footer widget", () => {
+	const env = createEnv({ globalConfig: { mcpServers: { a: { command: "x" } } }, toolNamespaces: ["mcp__a"] });
+	env.startSession();
+	env.shutdownSession();
+	for (const widgetId of FOOTER_WIDGETS) assert.equal(env.lastEmit(widgetId), null, widgetId);
+});
+
+test("/mcp-status color off clears the colored indicator and notifies", async () => {
+	const env = createEnv({ globalConfig: { mcpServers: { a: { command: "x" } } }, toolNamespaces: ["mcp__a"] });
+	env.startSession();
+	assert.equal(env.lastEmit("mcp_indicator_color"), "● MCP 1/1");
+	await env.command("color off");
+	assert.equal(env.lastEmit("mcp_indicator_color"), null);
+	assert.match(env.ui.notifications.at(-1) ?? "", /off/);
+	await env.command("color on");
+	assert.equal(env.lastEmit("mcp_indicator_color"), "● MCP 1/1");
+});
+
+test("/mcp-status on keeps the panel open after servers settled", async () => {
+	const env = createEnv({ globalConfig: { mcpServers: { a: { command: "x" } } }, toolNamespaces: ["mcp__a"] });
+	env.startSession();
+	env.advance(6_000);
+	assert.equal(env.ui.widget, undefined, "auto-hidden after settle");
+	await env.command("on");
+	env.advance(10_000);
+	assert.ok(env.ui.widget, "pinned panel must not be auto-hidden again");
+});
+
+
+test("/mcp-status on survives the next turn", async () => {
+	const env = createEnv({ globalConfig: { mcpServers: { a: { command: "x" } } }, toolNamespaces: ["mcp__a"] });
+	env.startSession();
+	env.advance(6_000);
+	await env.command("on");
+	env.turnStart();
+	assert.ok(env.ui.widget, "an explicit 'on' is not undone by the next prompt");
+});
+
+
+test("names that share a namespace are reported as a conflict, the first one wins", async () => {
+	const env = createEnv({
+		globalConfig: { mcpServers: { "a-b": { command: "x" }, a_b: { command: "y" } } },
+		toolNamespaces: ["mcp__a_b"],
+	});
+	env.startSession();
+	await env.command("on"); // keep the panel past the auto-hide, to inspect the settled state
+	env.advance(16_000);
+	const panel = env.panelText() ?? "";
+	assert.match(panel, /✓ a-b/);
+	assert.doesNotMatch(panel, /✗/);
+	assert.match(panel, /server "a_b" conflicts with "a-b"/);
+});
+
+
+test("a throwing publish does not stop the poll loop", () => {
+	const env = createEnv({ globalConfig: { mcpServers: { a: { command: "x" } } } });
+	env.startSession();
+	env.state.themeThrows = true;
+	assert.doesNotThrow(() => env.advance(400));
+	const before = env.state.getAllToolsCalls;
+	env.advance(3_000);
+	assert.ok(env.state.getAllToolsCalls > before, "polling continues");
+});
+
+test("nothing polls or publishes after the session shut down", () => {
+	const env = createEnv({ globalConfig: { mcpServers: { a: { command: "x" } } } });
+	env.startSession();
+	env.shutdownSession();
+	const polls = env.state.getAllToolsCalls;
+	const emits = env.emits.length;
+	env.advance(30_000);
+	assert.equal(env.state.getAllToolsCalls, polls);
+	assert.equal(env.emits.length, emits);
+});
+
+test("a restarted session is not affected by timers of the previous one", () => {
+	const env = createEnv({ globalConfig: { mcpServers: { a: { command: "x" } } } });
+	env.startSession();
+	env.advance(1_000);
+	env.shutdownSession();
+	env.startSession();
+	const before = env.state.getAllToolsCalls;
+	env.advance(1_000);
+	// One poll loop at 400ms: 2 or 3 polls in a second. Two loops would give 5 or more.
+	assert.ok(env.state.getAllToolsCalls - before <= 3, "a single poll loop is running");
+});
+
+test("a project server sharing a namespace with a global one is a conflict", () => {
+	const env = createEnv({
+		globalConfig: { mcpServers: { "a-b": { command: "x" } } },
+		projectConfig: { mcpServers: { a_b: { command: "y" } } },
+		toolNamespaces: ["mcp__a_b"],
+	});
+	env.startSession();
+	assert.match(env.panelText() ?? "", /✓ a-b/);
+	assert.match(env.panelText() ?? "", /server "a_b" conflicts with "a-b"/);
+});
+
+test("a registered server sharing a namespace with an mcp.json server is skipped", () => {
+	const env = createEnv({
+		globalConfig: { mcpServers: { "a-b": { command: "x", enabled: false } } },
+		registered: [{ name: "a_b", config: { command: "y" } }],
+	});
+	env.startSession();
+	const rows = (env.ui.widget ?? []).filter((line) => /a[-_]b/.test(line));
+	assert.equal(rows.length, 1);
+	assert.match(rows[0] ?? "", /– a-b/);
+});
+
+test("config the built-in rejects is a config error, not a failing server", async () => {
+	const env = createEnv({
+		globalConfig: {
+			mcpServers: {
+				ok: { command: "x" },
+				sse: { url: "https://example.com", type: "sse" },
+				flag: { command: "x", enabled: "no" },
+			},
+		},
+		toolNamespaces: ["mcp__ok"],
+	});
+	env.startSession();
+	await env.command("on");
+	env.advance(70_000);
+	const panel = env.panelText() ?? "";
+	assert.match(panel, /2 config errors/);
+	assert.doesNotMatch(panel, /✗/);
+});
+
+
+
+test("config errors are visible even when no server is valid", () => {
+	const env = createEnv({ globalConfig: { mcpServers: { nocmd: {} } } });
+	env.startSession();
+	assert.match(env.panelText() ?? "", /1 config error/);
+});
+
+
+
+test("disabling a server in mcp.json after start is picked up", () => {
+	const env = createEnv({ globalConfig: { mcpServers: { a: { command: "x" } } }, toolNamespaces: ["mcp__a"] });
+	env.startSession();
+	env.writeGlobalConfig({ mcpServers: { a: { command: "x", enabled: false } } });
+	env.advance(4_000);
+	assert.equal(env.ui.status, "MCP 0/0");
+});
+
+test("enabling a disabled server in mcp.json starts its own connect clock", async () => {
+	const env = createEnv({ globalConfig: { mcpServers: { a: { command: "x", enabled: false } } } });
+	env.startSession();
+	await env.command("on"); // everything is settled at start, so the automatic panel would be gone
+	env.advance(100_000);
+	env.writeGlobalConfig({ mcpServers: { a: { command: "x" } } });
+	env.advance(4_000);
+	// Not "no response" just because the session is old: the wait starts when it was enabled.
+	assert.match(env.panelText() ?? "", /◌ a/);
+	assert.equal(env.ui.status, "MCP 0/1");
+});
+
+test("tools the built-in integration withdrew (hidden) do not count as connected", async () => {
+	const env = createEnv({
+		globalConfig: { mcpServers: { a: { command: "x", enabled: false } } },
+		toolNamespaces: [{ namespace: "mcp__a", exposure: "hidden" }],
+	});
+	env.startSession();
+	await env.command("on");
+	env.writeGlobalConfig({ mcpServers: { a: { command: "x" } } });
+	env.advance(4_000);
+	assert.match(env.panelText() ?? "", /◌ a/, "re-enabled, but its old tools are still hidden");
+	env.state.toolNamespaces = [{ namespace: "mcp__a", exposure: "codemode" }];
+	env.advance(1_000);
+	assert.equal(env.ui.status, "MCP 1/1");
+});
+
+test("a server configured with the hidden exposure counts its hidden tools", () => {
+	const env = createEnv({
+		globalConfig: { mcpServers: { a: { command: "x", exposure: "hidden" } } },
+		toolNamespaces: [{ namespace: "mcp__a", exposure: "hidden" }],
+	});
+	env.startSession();
+	assert.equal(env.ui.status, "MCP 1/1");
+});
+
+test("a server's own timeout decides when it counts as unresponsive", () => {
+	const env = createEnv({ globalConfig: { mcpServers: { a: { command: "x", timeout: 5 } } } });
+	env.startSession();
+	env.advance(6_000);
+	assert.equal(env.ui.status, "MCP 0/1", "still within timeout + grace");
+	env.advance(2_000);
+	assert.equal(env.ui.status, "MCP 0/1 · 1!");
+});
+
+test("a server registered by an extension after startup shows up", () => {
+	const env = createEnv({ globalConfig: { mcpServers: { a: { command: "x" } } }, toolNamespaces: ["mcp__a"] });
+	env.startSession();
+	env.state.registered.push({ name: "late", config: { command: "y" } });
+	env.advance(1_000);
+	assert.match(env.panelText() ?? "", /late/);
+});
+
+test("a server added to mcp.json after startup shows up, also when there was none", () => {
+	const env = createEnv({});
+	env.startSession();
+	assert.equal(env.ui.status, undefined);
+	env.writeGlobalConfig({ mcpServers: { fresh: { command: "x" } } });
+	env.advance(4_000);
+	assert.match(env.panelText() ?? "", /◌ fresh/);
+	assert.equal(env.ui.status, "MCP 0/1");
+});
+
+test("a panel that only has config errors stays until the first turn", () => {
+	const env = createEnv({ globalConfig: { mcpServers: { nocmd: {} } } });
+	env.startSession();
+	env.advance(30_000);
+	assert.match(env.panelText() ?? "", /1 config error/);
+	env.turnStart();
+	assert.equal(env.ui.widget, undefined);
+});
+
+test("a project override is validated together with the global entry it changes", () => {
+	const env = createEnv({
+		globalConfig: { mcpServers: { a: { command: "x" }, b: { command: "x" }, c: { command: "x" } } },
+		projectConfig: {
+			mcpServers: {
+				a: { enabled: false },
+				b: { exposure: "nope" },
+				c: { enabled: false, command: undefined, args: ["x"] },
+			},
+		},
+		toolNamespaces: ["mcp__b", "mcp__c"],
+	});
+	env.startSession();
+	const panel = env.panelText() ?? "";
+	assert.match(panel, /– a/, "a valid override applies");
+	assert.match(panel, /✓ b/, "an invalid override is reported and not applied");
+	assert.match(panel, /exposure must be one of/);
+	assert.match(panel, /✓ c/);
+	assert.match(panel, /an override can only set enabled, exposure, toolExposure/);
+});
+
+test("a project server cannot use auth, like in the built-in integration", () => {
+	const env = createEnv({
+		globalConfig: { mcpServers: { ok: { command: "x" } } },
+		projectConfig: { mcpServers: { p: { url: "https://example.com/mcp", auth: { provider: "github" } } } },
+		toolNamespaces: ["mcp__ok"],
+	});
+	env.startSession();
+	assert.match(env.panelText() ?? "", /auth is only allowed in the global mcp\.json/);
+	assert.doesNotMatch(env.panelText() ?? "", /\bp\b.*(◌|✗)/);
+});
