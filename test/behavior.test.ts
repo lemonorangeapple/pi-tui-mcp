@@ -138,3 +138,94 @@ test("/mcp-status color off clears the colored indicator and notifies", async ()
 	await env.command("color on");
 	assert.equal(env.lastEmit("mcp_indicator_color"), "● MCP 1/1");
 });
+
+test("/mcp-status on keeps the panel open after servers settled", async () => {
+	const env = createEnv({ globalConfig: { mcpServers: { a: { command: "x" } } }, toolNamespaces: ["mcp__a"] });
+	env.startSession();
+	env.advance(6_000);
+	assert.equal(env.ui.widget, undefined, "auto-hidden after settle");
+	await env.command("on");
+	env.advance(10_000);
+	assert.ok(env.ui.widget, "pinned panel must not be auto-hidden again");
+});
+
+
+test("/mcp-status on survives the next turn", async () => {
+	const env = createEnv({ globalConfig: { mcpServers: { a: { command: "x" } } }, toolNamespaces: ["mcp__a"] });
+	env.startSession();
+	env.advance(6_000);
+	await env.command("on");
+	env.turnStart();
+	assert.ok(env.ui.widget, "an explicit 'on' is not undone by the next prompt");
+});
+
+
+test("names that share a namespace are reported as a conflict, the first one wins", async () => {
+	const env = createEnv({
+		globalConfig: { mcpServers: { "a-b": { command: "x" }, a_b: { command: "y" } } },
+		toolNamespaces: ["mcp__a_b"],
+	});
+	env.startSession();
+	await env.command("on"); // keep the panel past the auto-hide, to inspect the settled state
+	env.advance(16_000);
+	const panel = env.panelText() ?? "";
+	assert.match(panel, /✓ a-b/);
+	assert.doesNotMatch(panel, /✗/);
+	assert.match(panel, /server "a_b" conflicts with "a-b"/);
+});
+
+
+test("a throwing publish does not stop the poll loop", () => {
+	const env = createEnv({ globalConfig: { mcpServers: { a: { command: "x" } } } });
+	env.startSession();
+	env.state.themeThrows = true;
+	assert.doesNotThrow(() => env.advance(400));
+	const before = env.state.getAllToolsCalls;
+	env.advance(3_000);
+	assert.ok(env.state.getAllToolsCalls > before, "polling continues");
+});
+
+test("nothing polls or publishes after the session shut down", () => {
+	const env = createEnv({ globalConfig: { mcpServers: { a: { command: "x" } } } });
+	env.startSession();
+	env.shutdownSession();
+	const polls = env.state.getAllToolsCalls;
+	const emits = env.emits.length;
+	env.advance(30_000);
+	assert.equal(env.state.getAllToolsCalls, polls);
+	assert.equal(env.emits.length, emits);
+});
+
+test("a restarted session is not affected by timers of the previous one", () => {
+	const env = createEnv({ globalConfig: { mcpServers: { a: { command: "x" } } } });
+	env.startSession();
+	env.advance(1_000);
+	env.shutdownSession();
+	env.startSession();
+	const before = env.state.getAllToolsCalls;
+	env.advance(1_000);
+	// One poll loop at 400ms: 2 or 3 polls in a second. Two loops would give 5 or more.
+	assert.ok(env.state.getAllToolsCalls - before <= 3, "a single poll loop is running");
+});
+
+test("a project server sharing a namespace with a global one is a conflict", () => {
+	const env = createEnv({
+		globalConfig: { mcpServers: { "a-b": { command: "x" } } },
+		projectConfig: { mcpServers: { a_b: { command: "y" } } },
+		toolNamespaces: ["mcp__a_b"],
+	});
+	env.startSession();
+	assert.match(env.panelText() ?? "", /✓ a-b/);
+	assert.match(env.panelText() ?? "", /server "a_b" conflicts with "a-b"/);
+});
+
+test("a registered server sharing a namespace with an mcp.json server is skipped", () => {
+	const env = createEnv({
+		globalConfig: { mcpServers: { "a-b": { command: "x", enabled: false } } },
+		registered: [{ name: "a_b", config: { command: "y" } }],
+	});
+	env.startSession();
+	const rows = (env.ui.widget ?? []).filter((line) => /a[-_]b/.test(line));
+	assert.equal(rows.length, 1);
+	assert.match(rows[0] ?? "", /– a-b/);
+});

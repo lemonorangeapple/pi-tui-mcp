@@ -101,6 +101,16 @@ function isOverride(raw: Record<string, unknown>): boolean {
 }
 
 /**
+ * A server already loaded under another name whose tools share `name`'s namespace: `-` and `_`
+ * both become `_`, so `a-b` and `a_b` would register the same `mcp__a_b` tools. The built-in
+ * integration keeps the first and reports the second as a conflict, so this does too.
+ */
+function findNamespaceClash(servers: Map<string, ServerInfo>, name: string): string | undefined {
+	const namespace = namespaceOf(name);
+	return [...servers.keys()].find((other) => other !== name && namespaceOf(other) === namespace);
+}
+
+/**
  * The servers the built-in MCP integration connects, with the same precedence: a project entry
  * replaces a global entry of the same name, and `mcp.json` wins over an extension registration.
  */
@@ -114,7 +124,12 @@ export function loadServers(
 	const globalPath = join(getAgentDir(), "mcp.json");
 	for (const { name, raw } of readEntries(globalPath, errors)) {
 		const info = makeServerInfo(name, raw, "global", globalPath);
-		if (typeof info === "string") errors.push(`${globalPath}: ${info}`);
+		if (typeof info === "string") {
+			errors.push(`${globalPath}: ${info}`);
+			continue;
+		}
+		const clash = findNamespaceClash(servers, name);
+		if (clash) errors.push(`${globalPath}: server "${name}" conflicts with "${clash}"`);
 		else servers.set(name, info);
 	}
 
@@ -138,13 +153,20 @@ export function loadServers(
 				continue;
 			}
 			const info = makeServerInfo(name, raw, "project", projectPath);
-			if (typeof info === "string") errors.push(`${projectPath}: ${info}`);
+			if (typeof info === "string") {
+				errors.push(`${projectPath}: ${info}`);
+				continue;
+			}
+			const clash = findNamespaceClash(servers, name);
+			if (clash) errors.push(`${projectPath}: server "${name}" conflicts with "${clash}"`);
 			else servers.set(name, info);
 		}
 	}
 
 	for (const registered of pi.getMcpServers()) {
-		if (servers.has(registered.name)) continue;
+		// `mcp.json` wins, also over a registration that only shares the namespace.
+		const namespace = namespaceOf(registered.name);
+		if ([...servers.keys()].some((name) => namespaceOf(name) === namespace)) continue;
 		const info = makeServerInfo(
 			registered.name,
 			registered.config as unknown as Record<string, unknown>,

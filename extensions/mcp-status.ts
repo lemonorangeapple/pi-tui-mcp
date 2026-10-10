@@ -27,6 +27,14 @@ import {
 	indicatorText,
 	summaryText,
 } from "../src/format.ts";
+import {
+	applyAction,
+	INITIAL_PANEL_MODE,
+	isVisible,
+	stepAside,
+	type PanelAction,
+	type PanelMode,
+} from "../src/panel.ts";
 import { allSettled, computeStatuses, readConnected, type ServerStatus } from "../src/status.ts";
 
 const WIDGET_KEY = "mcp-status";
@@ -45,7 +53,7 @@ const FAST_POLL_MS = 400;
 const SLOW_POLL_MS = 3000;
 /** After this long without tools, an enabled server is shown as unresponsive. */
 const SETTLE_MS = 15_000;
-/** How long the panel stays after every server settled, unless the first prompt hides it sooner. */
+/** How long the automatic panel stays after every server settled, unless the first prompt hides it sooner. */
 const HIDE_AFTER_SETTLED_MS = 3000;
 
 function emitFooterWidget(pi: ExtensionAPI, widgetId: string, value: string | null): void {
@@ -56,15 +64,24 @@ function emitFooterWidget(pi: ExtensionAPI, widgetId: string, value: string | nu
 	}
 }
 
+/** Timers must not keep the process alive because of a status poll. */
+function unrefTimer(timer: ReturnType<typeof setTimeout>): void {
+	(timer as unknown as { unref?: () => void }).unref?.();
+}
+
 export default function mcpStatusExtension(pi: ExtensionAPI): void {
-	let generation = 0;
+	/**
+	 * Identifies the running session. Timers capture the value they were created under and do nothing
+	 * once it changed, so a callback of a shut-down session cannot touch the next one.
+	 */
+	let epoch = 0;
 	let servers: ServerInfo[] = [];
 	let errors: string[] = [];
 	let statuses: ServerStatus[] = [];
 	let startedAt = 0;
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let hideTimer: ReturnType<typeof setTimeout> | undefined;
-	let widgetVisible = true;
+	let panelMode: PanelMode = INITIAL_PANEL_MODE;
 	let sessionCtx: ExtensionContext | undefined;
 	let publishedSummary: string | null = null;
 	let publishedServers: string | null = null;
@@ -82,16 +99,27 @@ export default function mcpStatusExtension(pi: ExtensionAPI): void {
 		}
 	};
 
+	/** The colored token, or the plain one when the theme cannot color (a stale theme must not blank it). */
+	const coloredIndicator = (indicator: string | null): string | null => {
+		const theme = colorEnabled ? currentTheme() : undefined;
+		if (!theme) return null;
+		try {
+			return coloredIndicatorText(statuses, theme);
+		} catch {
+			return indicator;
+		}
+	};
+
 	/**
 	 * Publish MCP state to pi-footer's event widgets. pi-footer is optional: without it the bus has
-	 * no listener. Values are in-memory, so they are re-published on every session start and tick.
+	 * no listener. Values are in-memory and only re-published when they change; a new session starts
+	 * from a published `null`, so its first publish always goes out.
 	 */
 	const publishFooter = () => {
 		const summary = servers.length > 0 ? summaryText(statuses) : null;
 		const detail = statuses.length > 0 ? detailText(statuses) : null;
 		const indicator = indicatorText(statuses);
-		const theme = colorEnabled ? currentTheme() : undefined;
-		const coloredIndicator = theme ? coloredIndicatorText(statuses, theme) : null;
+		const colored = coloredIndicator(indicator);
 		if (summary !== publishedSummary) {
 			publishedSummary = summary;
 			emitFooterWidget(pi, FOOTER_WIDGET_SUMMARY, summary);
@@ -104,17 +132,21 @@ export default function mcpStatusExtension(pi: ExtensionAPI): void {
 			publishedIndicator = indicator;
 			emitFooterWidget(pi, FOOTER_WIDGET_INDICATOR, indicator);
 		}
-		if (coloredIndicator !== publishedIndicatorColor) {
-			publishedIndicatorColor = coloredIndicator;
-			emitFooterWidget(pi, FOOTER_WIDGET_INDICATOR_COLOR, coloredIndicator);
+		if (colored !== publishedIndicatorColor) {
+			publishedIndicatorColor = colored;
+			emitFooterWidget(pi, FOOTER_WIDGET_INDICATOR_COLOR, colored);
 		}
+	};
+
+	const clearHideTimer = () => {
+		if (hideTimer) clearTimeout(hideTimer);
+		hideTimer = undefined;
 	};
 
 	const clearTimers = () => {
 		if (timer) clearTimeout(timer);
-		if (hideTimer) clearTimeout(hideTimer);
 		timer = undefined;
-		hideTimer = undefined;
+		clearHideTimer();
 	};
 
 	const render = () => {
@@ -122,7 +154,7 @@ export default function mcpStatusExtension(pi: ExtensionAPI): void {
 		if (!ctx) return;
 		if (ctx.mode !== "tui" || !ctx.hasUI) return;
 
-		if (widgetVisible && statuses.length > 0) {
+		if (isVisible(panelMode) && statuses.length > 0) {
 			const theme = ctx.ui.theme;
 			ctx.ui.setWidget(WIDGET_KEY, buildLines(statuses, errors, theme, true), { placement: "aboveEditor" });
 		} else {
@@ -136,54 +168,60 @@ export default function mcpStatusExtension(pi: ExtensionAPI): void {
 		ctx.ui.setStatus(STATUS_KEY, summaryText(statuses));
 	};
 
-	const hideWidget = () => {
-		if (!widgetVisible) return;
-		widgetVisible = false;
-		render();
-	};
-
-	const scheduleHideWhenSettled = () => {
-		if (hideTimer || !widgetVisible || statuses.length === 0) return;
-		if (!allSettled(statuses)) return;
-		hideTimer = setTimeout(() => {
-			hideTimer = undefined;
-			if (generation === currentGeneration) hideWidget();
-		}, HIDE_AFTER_SETTLED_MS);
-		(hideTimer as unknown as { unref?: () => void }).unref?.();
-	};
-
-	let currentGeneration = 0;
-
-	const schedule = (delay: number) => {
-		timer = setTimeout(() => {
-			timer = undefined;
-			if (generation !== currentGeneration) return;
-			tick();
-		}, delay);
-		// Do not keep the process alive because of a status poll.
-		(timer as unknown as { unref?: () => void }).unref?.();
-	};
-
-	const tick = () => {
-		const ctx = sessionCtx;
-		if (!ctx || generation !== currentGeneration) return;
-		let counts: Map<string, number>;
-		try {
-			counts = readConnected(pi, servers);
-		} catch {
-			counts = new Map();
-		}
-		const settled = Date.now() - startedAt >= SETTLE_MS;
-		statuses = computeStatuses(servers, counts, settled);
-		publishFooter();
+	/** Render from a timer or event: a stale context after session replacement must not throw. */
+	const safeRender = () => {
 		try {
 			render();
 		} catch {
-			// A stale context after session replacement must not break the poll loop.
+			// Non-interactive modes and replaced sessions render nothing.
 		}
-		scheduleHideWhenSettled();
-		schedule(settled ? SLOW_POLL_MS : FAST_POLL_MS);
 	};
+
+	/** The automatic panel steps aside; a pinned or hidden one is left alone. */
+	const stepPanelAside = () => {
+		const next = stepAside(panelMode);
+		if (next === panelMode) return;
+		panelMode = next;
+		safeRender();
+	};
+
+	const scheduleHideWhenSettled = () => {
+		if (hideTimer || panelMode !== "auto" || statuses.length === 0) return;
+		if (!allSettled(statuses)) return;
+		const run = epoch;
+		hideTimer = setTimeout(() => {
+			hideTimer = undefined;
+			if (run === epoch) stepPanelAside();
+		}, HIDE_AFTER_SETTLED_MS);
+		unrefTimer(hideTimer);
+	};
+
+	const schedule = (delay: number) => {
+		const run = epoch;
+		timer = setTimeout(() => {
+			timer = undefined;
+			if (run === epoch) tick();
+		}, delay);
+		unrefTimer(timer);
+	};
+
+	const tick = () => {
+		if (!sessionCtx) return;
+		const settled = Date.now() - startedAt >= SETTLE_MS;
+		try {
+			statuses = computeStatuses(servers, readConnected(pi, servers), settled);
+			publishFooter();
+			safeRender();
+			scheduleHideWhenSettled();
+		} catch {
+			// Whatever went wrong this round, the next poll gets its chance.
+		} finally {
+			schedule(settled ? SLOW_POLL_MS : FAST_POLL_MS);
+		}
+	};
+
+	const parseAction = (value: string): PanelAction | undefined =>
+		value === "on" || value === "off" || value === "toggle" ? value : value === "" ? "toggle" : undefined;
 
 	pi.registerCommand("mcp-status", {
 		description: "Show or hide the MCP server loading status panel",
@@ -196,14 +234,11 @@ export default function mcpStatusExtension(pi: ExtensionAPI): void {
 		},
 		handler: async (args, ctx) => {
 			const action = args.trim().toLowerCase();
-			if (action === "on" || action === "off" || action === "toggle" || action === "") {
-				const next = action === "on" ? true : action === "off" ? false : !widgetVisible;
-				widgetVisible = next;
+			const panelAction = parseAction(action);
+			if (panelAction) {
+				panelMode = applyAction(panelMode, panelAction);
 				sessionCtx = ctx;
-				if (hideTimer) {
-					clearTimeout(hideTimer);
-					hideTimer = undefined;
-				}
+				clearHideTimer();
 				render();
 				return;
 			}
@@ -223,9 +258,9 @@ export default function mcpStatusExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_start", (_event, ctx) => {
 		clearTimers();
-		currentGeneration = ++generation;
+		epoch++;
 		sessionCtx = ctx;
-		widgetVisible = true;
+		panelMode = INITIAL_PANEL_MODE;
 		startedAt = Date.now();
 		try {
 			const loaded = loadServers(pi, ctx);
@@ -235,39 +270,29 @@ export default function mcpStatusExtension(pi: ExtensionAPI): void {
 			servers = [];
 			errors = [errorMessage(error)];
 		}
-		const counts = servers.length > 0 ? readConnected(pi, servers) : new Map<string, number>();
-		statuses = computeStatuses(servers, counts, false);
+		statuses = computeStatuses(servers, readConnected(pi, servers), false);
 		publishFooter();
-		try {
-			render();
-		} catch {
-			// Non-interactive modes render nothing.
-		}
+		safeRender();
 		if (servers.length > 0) {
 			schedule(FAST_POLL_MS);
 			scheduleHideWhenSettled();
 		}
 	});
 
-	// The first prompt is the user's turn: the startup panel steps aside. The footer status stays.
+	// The first prompt is the user's turn: the automatic startup panel steps aside. The footer status stays.
 	pi.on("turn_start", (_event, _ctx) => {
-		if (widgetVisible) {
-			if (hideTimer) {
-				clearTimeout(hideTimer);
-				hideTimer = undefined;
-			}
-			hideWidget();
-		}
+		clearHideTimer();
+		stepPanelAside();
 	});
 
 	pi.on("session_shutdown", () => {
 		clearTimers();
-		generation++;
+		epoch++;
 		sessionCtx = undefined;
 		statuses = [];
 		servers = [];
 		errors = [];
-		widgetVisible = false;
+		panelMode = "hidden";
 		publishFooter();
 	});
 }
