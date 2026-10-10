@@ -78,6 +78,7 @@ server 连上后，built-in 会注册 `mcp__<server>__<tool>`，namespace 为 `m
 - **无法**拿到真实错误文本。真正失败的 server（命令不存在、需要登录）要等到 `timeout` 之后才会标成 `unresponsive`，默认约 62 秒；在此之前显示 `connecting`。
 - 一个**连上但没有工具**（比如只提供 resources）的 server 无法被检测到，会一直显示 connecting，之后是 unresponsive。
 - 用 `toolExposure` 把一个 server 的**全部**工具都设为 `hidden`，同样会被看成没有工具。
+- **手改 `mcp.json` 不会被 built-in 热加载**，只有在 `/mcp` 里启停才会立即生效；而本扩展按文件内容显示。所以手动启用一个 server 后，面板会显示 `connecting…`，超过 `timeout` 后变成 `unresponsive`，但其实 built-in 根本没有去连它，直到执行 `/reload`（两边随即一致）。手动禁用同理：面板显示 `disabled`，实际上它仍然连着。请用 `/mcp` 管理，或改完文件后 `/reload`。
 - 连上之后**掉线**无法被感知：built-in 不会撤回已注册的工具，所以仍显示 connected。
 - 只读观察，不会触发连接，也不会影响 built-in MCP、`/mcp` 管理器或 codemode。本扩展**不**订阅 `mcp_servers_change`：处理该事件会让扩展被标记为“负责连接 registered server”的那一个，干扰 built-in。
 
